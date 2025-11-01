@@ -1,0 +1,2386 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model version="NetLogo 3D 7.0.0" snapToGrid="false">
+  <code><![CDATA[; Agentic & Multiagent systems course code
+
+extensions [ gis csv nw table view2.5d]
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BREEDS & LINKS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+breed [ homes house ]          ;; keep singular = house (avoid built-in 'home' command)
+breed [ residents resident ]
+breed [ banks bank ]
+breed [ ngos ngo]
+breed [ professionals professional ]
+breed [ governments government ]
+
+breed [ road-nodes road-node ]
+undirected-link-breed [ road-segments road-segment ]
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; GLOBALS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+globals [
+  world-env                    ;; GIS envelope used for the world mapping
+  
+  ; lists
+  priority-list
+  critical-list
+  feature-costs
+  feature-names
+  
+  ; time
+  monthly-time ; to get monthly-fee
+  
+  ;bank-related
+  interest-rate
+  government-money
+  funding-time
+  banks-money
+  loan-time-payment ; how often the bank gives loans
+  loan-payback-time ; how ofter residents have to give money back
+  
+  ; ngo related
+  train-batch
+  cost-of-training
+  teaching-time
+  
+  ; gov-related
+  granting-batch
+  
+  ; prof-related
+  num-prof
+  time-to-repair-feature 
+  
+  ;; --- datasets & IO ---
+  buildings-ds
+  roads-ds
+  dem-ds
+  slope-ds
+  landuse-ds
+  feats-buildings
+  
+  csv-by-id
+  csv-headers                  
+
+  ;; headers
+  shp-id-field
+  csv-id-field
+  csv-safety-field
+  csv-income-field
+  csv-awareness-field
+  csv-trust-field
+  csv-is-Trained
+  csv-f1
+  csv-f2
+  csv-f3
+  csv-f4
+  csv-f5
+  csv-f6
+  csv-f7
+  csv-f8
+  csv-f9
+  csv-f10
+  csv-f11
+  csv-f12
+  csv-f13
+  csv-f14
+  csv-motivation
+  
+  
+  ; independent variables we are checking
+  mean-safety-after-3-months
+  mean-safety-after-6-months
+  mean-safety-after-1-year
+  mean-safety-after-2-years
+  mean-safety-after-3-years
+  
+  num-safe-houses-after-3-months
+  num-safe-houses-after-6-months
+  num-safe-houses-after-1-year
+  num-safe-houses-after-2-years
+  num-safe-houses-after-3-years
+  
+  
+]
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; OWN VARIABLES
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+patches-own [ 
+  elev
+]
+
+homes-own [
+  hid
+  safety                     ; 0–14
+  f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13 f14
+  cost-of-repair
+  features-to-repair
+  has-owner
+  time-to-repair
+  being-repaired
+  repairs-completed
+  gov-house
+  gov-cost
+]
+
+residents-own [
+  home-agent
+  income
+  motivation
+  monthly-money-gained
+  
+  ; training features
+  isTrained
+  time-to-repair-manually
+  features-fixed-manually
+  asked-for-prof-help
+  asked-for-gov-money
+  received-gov-money
+  
+  ; bank features
+  apply-for-bank-loan
+  bank-loan-given
+  money-to-give-bank-back
+  bank-loan-completed
+  time-to-pay-bank-loan
+  monthly-bank-payment
+  
+  ; government features
+  asked-for-gov-home
+]
+
+banks-own [
+  loan-queue
+  money
+  time-to-loan
+]
+
+ngos-own[
+  funds
+  time-to-teach
+  teaching
+  current-trainees
+  has-been-funded
+]
+
+professionals-own[
+  repairing-list
+  bank-account
+]
+
+governments-own[
+  money-to-distribute
+  time-to-fund-residents
+  homes-grant-given
+  granting-list
+  money-for-buying-homes
+  money-for-ngos
+  money-for-funding-residents
+  time-for-buying-homes
+]
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; DEFAULTS & SETUP
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to defaults
+  ; create the defaults
+  let bfile "data/Community_Buildings.shp"
+  let rfile "data/Community_Roads.shp"        ;; optional
+
+  if not file-exists? bfile [
+    user-message "Missing data/Community_Buildings.shp (+ .dbf/.shx/.prj)."
+    stop
+  ]
+
+  set buildings-ds gis:load-dataset bfile
+  if file-exists? rfile [ set roads-ds gis:load-dataset rfile ]
+
+  ;; Optional rasters (AAIGrid .asc)
+  let demfile   "data/Community_DEM.asc"
+  let slopefile "data/Community_Slope.asc"
+  let lufile    "data/Community_Landuse.asc"
+  if file-exists? demfile   [ set dem-ds     gis:load-dataset demfile ]
+  if file-exists? slopefile [ set slope-ds   gis:load-dataset slopefile ]
+  if file-exists? lufile    [ set landuse-ds gis:load-dataset lufile ]
+
+  ;; --- Make the world match the DEM so the display fills the viewer ---
+  if dem-ds != nobody [
+    let cols gis:width-of  dem-ds
+    let rows gis:height-of dem-ds
+    ;; NetLogo 3D: resize-world expects 6 arguments (x min/max, y min/max, z min/max)
+    resize-world 0 (cols - 1) 0 (rows - 1) 0 0
+
+    set world-env gis:envelope-of dem-ds
+    gis:set-world-envelope world-env
+
+    ;; apply DEM values to patches so we can color / test coverage
+    gis:apply-raster dem-ds elev
+  ]
+
+  ;; --- Fallback when there is no DEM: union of available vector/rasters ---
+  if dem-ds = nobody [
+    let env gis:envelope-of buildings-ds
+    if roads-ds   != nobody [ set env gis:envelope-union-of env (gis:envelope-of roads-ds) ]
+    if slope-ds   != nobody [ set env gis:envelope-union-of env (gis:envelope-of slope-ds) ]
+    if landuse-ds != nobody [ set env gis:envelope-union-of env (gis:envelope-of landuse-ds) ]
+    set world-env env
+    gis:set-world-envelope world-env
+  ]
+
+  ;; ----------------------------------------------------------------------
+  ;; Everything below is your original defaults content (unchanged)
+  ;; ----------------------------------------------------------------------
+
+  set shp-id-field "building_id"
+  ;; Cache features AFTER envelope is set
+  set feats-buildings gis:feature-list-of buildings-ds
+  
+  ;; Field names 
+  set shp-id-field "OSM_ID"
+  set csv-id-field "OSM_ID"
+  set csv-safety-field     "housing_safety_score"
+  set csv-income-field     "income"
+  set csv-is-Trained       "isTrained"
+  set csv-f1               "f1"
+  set csv-f2               "f2"
+  set csv-f3               "f3"
+  set csv-f4               "f4"
+  set csv-f5               "f5"
+  set csv-f6               "f6"
+  set csv-f7               "f7"
+  set csv-f8               "f8"
+  set csv-f9               "f9"
+  set csv-f10              "f10"
+  set csv-f11              "f11"
+  set csv-f12              "f12"
+  set csv-f13              "f13"
+  set csv-f14              "f14"
+  set csv-motivation       "motivation"
+  
+  ;; CSV path
+  let cfile "data/housing_data.csv"
+  if not file-exists? cfile [
+    user-message "Missing CSV in data/. Update cfile in defaults if name differs."
+    stop
+  ]
+  setup-csv cfile
+  
+  set feature-costs [834 790 544 1020 940 600 850 785 850 670 970 860 1075 1485] 
+  set feature-names ["f1" "f2" "f3" "f4" "f5" "f6" "f7" "f8" "f9" "f10" "f11" "f12" "f13" "f14"]
+  
+  set critical-list []
+  set interest-rate 1.05 ; interest rate of 5%
+  set monthly-time 30    ; for time purposes
+  
+  set government-money 80000
+  set funding-time 30 
+  
+  set banks-money 100000
+  set loan-time-payment 30
+  set loan-payback-time 30
+  
+  set train-batch 20
+  set cost-of-training 23200
+  set teaching-time 50
+  
+  set granting-batch 50000
+  
+  set num-prof 15
+  set time-to-repair-feature 5
+  
+  ;set the mean scores
+  set mean-safety-after-3-months 0
+  set mean-safety-after-6-months 0
+  set mean-safety-after-1-year 0
+  set mean-safety-after-2-years 0
+  set mean-safety-after-3-years 0
+  
+  set num-safe-houses-after-3-months 0
+  set num-safe-houses-after-6-months 0
+  set num-safe-houses-after-1-year 0
+  set num-safe-houses-after-2-years 0 
+  set num-safe-houses-after-3-years 0
+end
+
+
+to setup
+  ca
+  defaults
+  draw-base                       ;; keep simple 2D base (no buildings)
+  spawn-homes-from-buildings      ;; buildings as circles (masked to DEM)
+  if roads-ds != nobody [ import-roads-as-links ]  ;; roads as 3D links (masked)
+  center-3d-view
+
+  setup-ngos
+  setup-professionals
+  setup-government
+  setup-banks
+  recolor-homes
+
+  if dem-ds != nobody [
+    show-dem-2_5d                 ;; build 2.5D DEM and drape agents
+  ]
+  
+  reset-ticks
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; CSV HELPERS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to setup-csv [ cfile ]
+  let rows csv:from-file cfile
+  if empty? rows [ user-message "CSV is empty." stop ]
+  set csv-headers (first rows)
+  let body but-first rows
+
+  set csv-by-id table:make
+  let id-index position csv-id-field csv-headers
+  if id-index = false [
+    user-message (word "CSV missing id field '" csv-id-field "'. Headers found: " csv-headers)
+    stop
+  ]
+
+  foreach body [ r ->
+    let key item id-index r
+    if not is-string? key [ set key word key "" ]
+    table:put csv-by-id (word key "") r
+  ]
+end
+
+to-report csv-get [ r fname default ]
+  let idx position fname csv-headers
+  if idx = false [ report default ]
+  if idx >= length r [ report default ]
+  let v item idx r
+  if v = "" or v = nobody [ report default ]
+  report v
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; DEM Helpers
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; True if the XY lies on a patch having a valid DEM value
+to-report in-dem? [xy]
+  if dem-ds = nobody [ report true ]  ;; if no DEM, accept everything
+  let p patch (item 0 xy) (item 1 xy) 0;;z = 0 in 3D
+  if p = nobody [ report false ]
+  ;; NaN test: NaN != NaN, so (elev <= elev) is false for NaN
+  report [elev] of p <= [elev] of p
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; CENTER VIEW
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Centers the camera on buildings (fallback to roads if needed)
+to center-3d-view
+  if buildings-ds != nobody [
+    center-on-dataset buildings-ds
+  ] 
+  if buildings-ds = nobody and roads-ds != nobody [
+    center-on-dataset roads-ds
+  ]
+end
+
+;; Put a hidden marker at the dataset centroid and watch it
+to center-on-dataset [ ds ]
+  let feats gis:feature-list-of ds
+  if empty? feats [ stop ]
+  let c gis:centroid-of first feats
+  let xy gis:location-of c
+  if empty? xy [ stop ]
+  crt 1 [
+    setxy item 0 xy item 1 xy
+    set zcor 0
+    hide-turtle
+  ]
+  reset-perspective          ;; optional: go to default camera distance
+  watch one-of turtles with [ hidden? ]  ;; center on the marker
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; DRAW ROADS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+to import-roads-as-links
+  ;; only remove road stuff, leave homes/residents/etc. alone
+  ask road-segments [ die ]
+  ask road-nodes    [ die ]
+
+  foreach (gis:feature-list-of roads-ds) [ feature ->
+    foreach (gis:vertex-lists-of feature) [ partVerts ->
+      let prev nobody
+      foreach partVerts [ vtx ->
+        let xy gis:location-of vtx
+        if not empty? xy and in-dem? xy [
+          create-road-nodes 1 [
+            set size 0
+            hide-turtle
+            setxyz item 0 xy item 1 xy 0
+            if prev != nobody [
+              create-road-segment-with prev [
+                set thickness 0.4
+                set color gray
+              ]
+            ]
+            set prev self
+          ]
+        ]
+      ]
+    ]
+  ]
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; DEM - digital elevation model
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+to color-dem
+  if dem-ds = nobody [ stop ]
+  let zmin gis:minimum-of dem-ds
+  let zmax gis:maximum-of dem-ds
+  ask patches with [ elev <= elev ] [
+    set pcolor scale-color green elev zmin zmax   ;; green hypsometric ramp
+  ]
+end
+
+to show-dem-2_5d
+  if dem-ds = nobody [ stop ]
+  ;; make sure patch colors are set before building the surface
+  color-dem
+  view2.5d:patch-view "DEM" [ p -> [elev] of p ]
+  view2.5d:set-z-scale "DEM" 0.02          ;; adjust exaggeration as desired
+  view2.5d:update-patch-view "DEM"
+  view2.5d:decorate-patch-view "DEM"       ;; draw turtles/links on the terrain
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; GIS DRAW & HOMES & SETUPS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to draw-base
+  if roads-ds     != nobody [ gis:draw roads-ds     0.5 ]
+  ;if buildings-ds != nobody [ gis:draw buildings-ds 1.0 ]
+end
+
+to setup-ngos
+  create-ngos 1[
+    set time-to-teach teaching-time
+    set teaching 0
+    set has-been-funded false
+  ]
+end
+
+to setup-professionals
+  create-professionals 1[
+    set repairing-list []
+    set bank-account 0
+  ]
+end
+
+to setup-government 
+  create-governments 1[
+    set money-to-distribute government-money
+    set time-to-fund-residents funding-time 
+    set homes-grant-given false
+    set granting-list []
+    set money-for-buying-homes buying-homes-multiplier * money-to-distribute
+    set money-for-ngos ngos-money-multiplier * money-to-distribute
+    set money-for-funding-residents residents-money-multiplier * money-to-distribute
+    set time-for-buying-homes 30
+  ]
+end
+
+
+to setup-banks 
+  create-banks 1[
+    set loan-queue []
+    set money banks-money ;for example
+    set time-to-loan loan-time-payment
+  ]
+end
+
+
+to spawn-homes-from-buildings
+  if not is-string? shp-id-field [ set shp-id-field (word shp-id-field "") ]
+  foreach feats-buildings [ f ->
+    let v gis:centroid-of f
+    if v != nobody [
+      let xy gis:location-of v
+      if not empty? xy and in-dem? xy [
+        ;; --- BUILDING ID ---
+        let bid gis:property-value f shp-id-field
+        if not is-string? bid [ set bid (word bid "") ]
+
+        ;; --- CREATE HOME AS CIRCLE ---
+        create-homes 1 [
+          set hid (word bid "")
+          setxy item 0 xy item 1 xy
+          set zcor 0
+          set shape "circle"      ;; << circle instead of "house"
+          set size 0.2
+          set color gray + 1
+          set features-to-repair []
+          set cost-of-repair 0
+          set time-to-repair 0
+          set being-repaired false
+          set gov-house false
+          set repairs-completed 0
+
+          ;; --- GET CSV ROW ---
+          let row ifelse-value table:has-key? csv-by-id hid
+                      [ table:get csv-by-id hid ]
+                      [ [] ]
+
+          ;; --- SAFETY SCORE & F1-F14 FACTORS ---
+          set f1  csv-get row csv-f1 0
+          set f2  csv-get row csv-f2 0
+          set f3  csv-get row csv-f3 0
+          set f4  csv-get row csv-f4 0
+          set f5  csv-get row csv-f5 0
+          set f6  csv-get row csv-f6 0
+          set f7  csv-get row csv-f7 0
+          set f8  csv-get row csv-f8 0
+          set f9  csv-get row csv-f9 0
+          set f10 csv-get row csv-f10 0
+          set f11 csv-get row csv-f11 0
+          set f12 csv-get row csv-f12 0
+          set f13 csv-get row csv-f13 0
+          set f14 csv-get row csv-f14 0
+
+          set safety (f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + f11 + f12 + f13 + f14)
+          set being-repaired false
+
+          if table:has-key? csv-by-id hid [
+            set has-owner true
+            ;; --- HATCH RESIDENT ---
+            hatch-residents 1 [
+              set home-agent myself
+              set income csv-get row csv-income-field 0
+              set isTrained (read-from-string (word (csv-get row csv-is-Trained "0"))) = 1
+              set time-to-repair-manually 7
+              set features-fixed-manually 3
+              set asked-for-prof-help false
+              set asked-for-gov-money false
+              set received-gov-money false
+              set apply-for-bank-loan false
+              set bank-loan-given false
+              set bank-loan-completed false
+              set monthly-money-gained 0.005 * income
+              set motivation csv-get row csv-motivation 0
+              set asked-for-gov-home false
+              set shape "person"
+              set size 0.1
+              set color blue
+            ]
+          ]
+          if not table:has-key? csv-by-id hid [
+            set has-owner false
+            set safety random 14
+            set gov-cost 7000 + random 2000
+          ]
+        ]
+      ]
+    ]
+  ]
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; HAZARD & COSTS 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to earthquake 
+  ask homes [
+    let counter 0
+    let current-safety safety
+    let reduction 0
+    
+    if current-safety <= 5 [; reduces 3-5
+      set reduction 3 + random 2
+    ]
+    if current-safety = 6 or current-safety = 7 [
+      set reduction 2 + random 3
+    ]
+    if current-safety >= 8 and current-safety <= 10 [
+      set reduction 2 + random 2
+    ]
+    if current-safety > 10 [
+      set reduction 1 + random 2
+    ]
+
+    while [counter < reduction] [
+      let random-feature one-of feature-names
+      let feature-value run-result (word " [ " random-feature " ] of self")
+      while [feature-value != 1 and count-features-with-value-1 > 0] [
+        set random-feature one-of feature-names
+        set feature-value run-result (word " [ " random-feature " ] of self")
+      ]
+      if feature-value = 1 [
+        run (word "set " random-feature " 0")
+        set counter counter + 1
+      ]
+      if count-features-with-value-1 = 0 [ set counter reduction ]
+    ]
+
+    let new-safety current-safety - counter
+    if new-safety < 0 [ set new-safety 0 ]
+    set safety new-safety
+  ]
+
+  recolor-homes
+end
+
+; Helper function to count how many features are currently set to 1
+to-report count-features-with-value-1
+  let count-1 0
+  foreach feature-names [ fn ->
+    let value run-result (word "[ " fn " ] of self")
+    if value = 1 [ set count-1 count-1 + 1 ]
+  ]
+  report count-1
+end
+
+to calculate-cost
+
+  ask homes with [has-owner = true] [
+    ;; case 1: homes needing repair (safety < 8) --> cost-of-repair is minimum cost to reach safety score of 8
+    ifelse safety < 8 [
+      let points-needed (8 - safety)
+      let damaged-features []
+
+      (foreach feature-names feature-costs [
+        [fname cost] ->
+          let value run-result (word "[ " fname " ] of self")
+          if value = 0 [
+            set damaged-features lput (list fname cost) damaged-features
+          ]
+      ])
+
+      let sorted-damaged sort-by [ [a b] -> item 1 a < item 1 b ] damaged-features
+      let num-to-fix min (list points-needed length sorted-damaged)
+      let chosen-features sublist sorted-damaged 0 num-to-fix
+
+      set features-to-repair map [ f -> item 0 f ] chosen-features
+      set cost-of-repair sum map [ f -> item 1 f ] chosen-features
+    ] 
+    
+    ;; case 2: homes with safety >= 8 
+    [
+      let damaged-features []
+      let res one-of residents with [home-agent = myself]
+      
+      ;; gather all damaged features
+      (foreach feature-names feature-costs [
+        [fname cost] ->
+          let value run-result (word "[ " fname " ] of self")
+          if value = 0 [
+            set damaged-features lput (list fname cost) damaged-features
+          ]
+      ])
+      
+      if [motivation] of res = 2 [
+        ;; repair minimum 3 features (cheapest 3)
+        let sorted-damaged sort-by [ [a b] -> item 1 a < item 1 b ] damaged-features
+        let num-to-fix min (list 3 length sorted-damaged)
+        let chosen-features sublist sorted-damaged 0 num-to-fix
+        set features-to-repair map [ f -> item 0 f ] chosen-features
+        set cost-of-repair sum map [ f -> item 1 f ] chosen-features
+      ]
+
+      if [motivation] of res = 3 [
+        ;; repair all features (cost of all features to 1)
+        set features-to-repair map [ f -> item 0 f ] damaged-features
+        set cost-of-repair sum map [ f -> item 1 f ] damaged-features
+      ]
+
+      if [motivation] of res != 2 and [motivation] of res != 3 [
+        ;; motivation = 1 or unknown → no repair
+        set features-to-repair []
+        set cost-of-repair 0
+      ]
+    ] 
+  ]  
+end
+
+;; Recompute plan for a single home (used after any change)
+to recalc-repair-plan [ h ]
+  ask h [
+    ifelse safety < 8 [
+      let points-needed (8 - safety)
+      let damaged []
+      (foreach feature-names feature-costs [
+        [fname cost] ->
+          let v run-result (word "[ " fname " ] of self")
+          if v = 0 [ set damaged lput (list fname cost) damaged ]
+      ])
+      let sorted sort-by [[a b] -> item 1 a < item 1 b] damaged
+      let n min (list points-needed length sorted)
+      let chosen sublist sorted 0 n
+      set features-to-repair map [f -> item 0 f] chosen
+      set cost-of-repair sum map [f -> item 1 f] chosen
+    ] [
+      set features-to-repair []
+      set cost-of-repair 0
+    ]
+  ]
+end
+
+
+to get-monthly-fee
+  
+  if monthly-time = 0 [
+    ask residents [
+      set income income + monthly-money-gained
+      
+      set monthly-time 30 ;set back again for 30 days
+      
+      
+    ]
+    let ngo-agent one-of ngos
+    let gov one-of governments
+    ask ngo-agent [
+      set funds funds + [money-for-ngos] of gov
+    ]
+    
+    
+    ask gov [
+      set money-for-buying-homes money-for-buying-homes + (buying-homes-multiplier * money-to-distribute)
+      set money-for-funding-residents money-for-funding-residents + (residents-money-multiplier * money-to-distribute)
+    ]
+  ]
+  if monthly-time != 0 [
+     set monthly-time monthly-time - 1
+  ]
+  
+  
+ 
+end
+  
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; MAIN LOOP
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to go
+  calculate-cost
+  get-monthly-fee
+
+  household-flow
+  ngos-flow
+  create-priority-list
+  gov-flow
+  prof-flow
+  bank-flow
+
+  recolor-homes
+
+  ;; keep the DEM colors current and world draped on terrain
+  if dem-ds != nobody [
+    color-dem
+    view2.5d:update-patch-view "DEM"
+    view2.5d:decorate-patch-view "DEM"
+  ]
+
+  update-the-plots
+
+  ;; (your tick-based stats unchanged)
+  if ticks = 90  [ set mean-safety-after-3-months mean [safety] of homes with [has-owner = true]
+                   set num-safe-houses-after-3-months count homes with [has-owner and safety >= 8] ]
+  if ticks = 180 [ set mean-safety-after-6-months mean [safety] of homes with [has-owner = true]
+                   set num-safe-houses-after-6-months count homes with [has-owner and safety >= 8] ]
+  if ticks = 360 [ set mean-safety-after-1-year mean [safety] of homes with [has-owner = true]
+                   set num-safe-houses-after-1-year count homes with [has-owner and safety >= 8] ]
+  if ticks = 720 [ set mean-safety-after-2-years mean [safety] of homes with [has-owner = true]
+                   set num-safe-houses-after-2-years count homes with [has-owner and safety >= 8] ]
+  if ticks = 1080 [ set mean-safety-after-3-years mean [safety] of homes with [has-owner = true]
+                    set num-safe-houses-after-3-years count homes with [has-owner and safety >= 8] ]
+
+  tick
+end
+
+
+to household-flow
+  
+  ask homes with [has-owner = true] [
+    let res one-of residents with [home-agent = myself]
+
+    if safety < 8 [      
+      ;if safety-score is 0/1, that means home is basically destroyed, so goverment can try to help with home       
+      if safety <= 1 [   
+        ask res [
+          set asked-for-gov-home true
+        ]
+      ]
+      
+      ;; Manual self-repair by trained residents (not in pro repair)
+      if [isTrained] of res = true and [features-fixed-manually] of res != 0 and not being-repaired [
+        repair-itself res       
+      ]
+       
+     
+      ; IF $ is enoughtHire professionals if untrained but wealthy enough and not already being repaired
+      if [income] of res >= cost-of-repair * 2 and not [asked-for-prof-help] of res and not being-repaired and not empty? features-to-repair [
+         ask res [ 
+           set asked-for-prof-help true 
+         ]  
+     ]
+          
+        ; IF $ not enough, ask for it to the government
+      if [income] of res / 2 < cost-of-repair and not [asked-for-gov-money] of res and not [received-gov-money] of res [
+        ask res [
+          set asked-for-gov-money true
+        ]
+      ]     
+    ]  
+  
+    if safety >= 8 and safety < 14 [
+      ;; Manual self-repair by trained residents (not in pro repair)
+      if [isTrained] of res = true and [features-fixed-manually] of res != 0 and not being-repaired [
+        repair-itself res   
+      ]
+    
+      ; see the motivation
+      if [motivation] of res = 1 [ ;if motivation = 1, then they will not build up
+        ;do nothing, already achieved the desired safety score
+      ]
+      
+      if [motivation] of res > 1 [ ;if motivation = 2, they will aim to repair 3 features more. If 3, they will go full in   
+        if [apply-for-bank-loan = false] of res and [not bank-loan-given] of res [ ;if never applied but also never completed 
+          ask res [
+            set apply-for-bank-loan true ; apply for bank-loan
+          ]
+        ]
+        if [bank-loan-given] of res and [not bank-loan-completed] of res [ ; pay periodically for bank loan     
+          pay-loan res        
+        ]
+      ]
+    ]
+   
+  ]
+end
+
+
+; FOR THE FUTURE --> PEOPLE WHO HAVE BEEN TRAINED CAN BE PART OF THE TEAM THAT TEACHES PEOPLE (AFTER THEY FINISH)
+to ngos-flow
+  
+  let max-trainees train-batch
+  
+  ask ngos [
+    
+  
+    if teaching = 0 [
+      let candidates residents with [not isTrained]
+      if any? candidates [
+        let num-trainees min (list max-trainees count candidates)
+        set current-trainees n-of num-trainees candidates
+        set teaching 1
+        set time-to-teach teaching-time
+        set funds funds - cost-of-training
+      ]
+    ]
+    if teaching = 1 [
+
+      if time-to-teach > 0 [ set time-to-teach time-to-teach - 1 ]
+      if time-to-teach = 0 [
+
+        if funds > cost-of-training [
+          ask current-trainees [ set isTrained true ]
+          set teaching 0
+          set current-trainees no-turtles
+          set time-to-teach teaching-time
+        ]
+      ]
+      ]
+  ]
+end
+
+
+to gov-flow
+  
+  ask governments [
+    
+    ;; --- 1. Fund NGOs initially ---
+    ask ngos [
+      if not has-been-funded [
+        set funds [money-for-ngos] of myself  ;; use gov's funding amount
+        set has-been-funded true
+      ]
+    ]
+    
+    ;; --- 2. Buy homes for people in critical situation ---
+    create-critical-list
+    give-homes-to-people
+     
+    ;; --- 3. Fund residents in need ---
+    if time-to-fund-residents = 0 [
+      
+      ;; These belong to this government only
+      let available-funds money-for-funding-residents
+      let funding-candidates sort-by [[a b] -> [cost-of-repair] of [home-agent] of a < [cost-of-repair] of [home-agent] of b] priority-list
+      
+      let total-granted 0
+      
+      ;; Reset this gov’s granting list before adding new recipients
+      set granting-list []
+      
+      ;; --- Step 3a: Fund as many as possible within available funds ---
+      foreach funding-candidates [ r ->
+        let h [home-agent] of r
+        let needed [cost-of-repair] of h
+        
+        if (total-granted + needed) <= available-funds [
+          set granting-list lput r granting-list
+          set total-granted total-granted + needed
+        ]
+      ]
+      
+      ;; --- Step 3b: Skip if no one could be funded ---
+      if (length granting-list = 0) [
+      ]
+      if (length granting-list != 0) [      
+
+        ;; --- Step 4: Give money to selected residents ---
+        foreach granting-list [ r ->
+          let h [home-agent] of r
+          let needed [cost-of-repair] of h
+          ask r [
+            set income income + needed
+            set received-gov-money true
+            set asked-for-gov-money false
+          ]
+        ]
+        
+        ;; --- Step 5: Deduct total grants and reset timer ---
+        set money-for-funding-residents money-for-funding-residents - total-granted
+        if money-for-funding-residents < 0 [ set money-for-funding-residents 0 ]
+      ]
+      
+      ;; Reset funding timer
+      set time-to-fund-residents funding-time
+    ]
+    
+    ;; --- Countdown timer for next funding round ---
+    if time-to-fund-residents != 0 [
+      set time-to-fund-residents time-to-fund-residents - 1
+    ]     
+  ]
+end
+
+
+to prof-flow
+  ask professionals [
+    let capacity num-prof
+
+    ;; fill queue up to capacity with eligible residents (avoid nobody/dupes)
+    let candidates residents with [asked-for-prof-help = true]
+    set candidates candidates with [[not being-repaired and safety < 8 and not empty? features-to-repair] of home-agent]
+
+    foreach sort candidates [ person ->
+      if length repairing-list < capacity and not member? person repairing-list [
+        set repairing-list lput person repairing-list
+        ask [home-agent] of person [
+          if empty? features-to-repair [
+          ]
+          set time-to-repair time-to-repair-feature * length features-to-repair
+          set being-repaired true
+        ]
+      ]
+    ]
+
+    ;; work on current queue
+    if length repairing-list > 0 [
+      foreach (sentence repairing-list []) [ res ->
+        let h [home-agent] of res
+
+        if [time-to-repair] of h = 0 [
+
+          ;; capture before zeroing so pros get paid
+          let repair-cost [cost-of-repair] of h
+
+          ask res [
+            set income income - repair-cost
+            set asked-for-prof-help false
+          ]
+
+          ask h [
+            set safety safety + length features-to-repair
+            foreach features-to-repair [ f ->
+              run (word "set " f " 1")
+            ]
+            set features-to-repair []
+            set being-repaired false
+            set repairs-completed repairs-completed + 1
+            set cost-of-repair 0
+            recalc-repair-plan self
+          ]
+
+          set bank-account bank-account + repair-cost
+          set repairing-list remove res repairing-list
+        ]
+        if [time-to-repair] of h != 0 [
+          ask h [ set time-to-repair time-to-repair - 1 ]
+        ]
+      ]
+    ]
+  ]
+end
+
+
+to bank-flow
+  create-bank-queue
+  ask banks [
+  
+  if time-to-loan = 0 [    
+    let i 0
+    let residents-to-loan length loan-queue
+        
+        while [i < residents-to-loan] [
+          let r item i loan-queue
+          let h [home-agent] of r
+          if r != nobody [
+            set i i + 1
+              
+            if money - [cost-of-repair] of h <= 0 [         
+              set i residents-to-loan ;exit loop           
+            ]
+          
+            if money - [cost-of-repair] of h > 0 [          
+              ask r [
+              
+                set bank-loan-given true
+                set bank-loan-completed false
+                set income income + [cost-of-repair] of h
+                set money-to-give-bank-back [cost-of-repair] of h * interest-rate
+                set monthly-bank-payment money-to-give-bank-back / 12 ; will be payed back in one year
+                set time-to-pay-bank-loan loan-payback-time ; pay once every month
+              ]
+            
+            set money money - [cost-of-repair] of h         
+            ]
+          
+          ]
+      ]
+
+    set time-to-loan time-to-loan
+  ]
+  
+  if time-to-loan != 0 [
+    set time-to-loan time-to-loan - 1
+  ]
+ ]
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; UI
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to recolor-homes
+  ask homes [
+    ifelse safety = 14 [
+      set color blue
+    ] [
+      ifelse safety < 8 [
+        set color red
+      ] [
+        set color yellow
+      ]
+    ]
+  ]
+end
+
+to update-the-plots
+  ;; existing plot
+
+  ;; Repairs: Needing vs Under-Repair vs Repaired
+  set-current-plot "Repairs: Needing vs Under-Repair vs Repaired"
+  set-current-plot-pen "needing"
+  plot homes-needing-repair
+  set-current-plot-pen "under-repair"
+  plot homes-under-repair
+  set-current-plot-pen "repaired"
+  plot homes-repaired
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; LIST CREATIONS / QUEUES
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+to create-priority-list
+ 
+  set priority-list [] ; empty list
+  let candidates residents with [asked-for-gov-money and not received-gov-money]
+  
+  
+  set candidates sort-by [ [a b] -> [income] of a < [income] of b ] candidates
+  
+  foreach sort candidates [ person ->
+    
+    let h [home-agent] of person
+
+    if [income] of person / 2 > [cost-of-repair] of h [
+      set priority-list remove person priority-list
+    ]
+    
+    if [income] of person / 2 <= [cost-of-repair] of h [
+       set priority-list lput person priority-list
+    ]
+  
+  ]
+ 
+ 
+end
+
+
+to create-critical-list
+
+  let candidates residents with [asked-for-gov-home]
+  set candidates sort-by [ [a b] -> [income] of a < [income] of b ] candidates
+  
+  foreach sort candidates [ res ->
+    
+    let h [home-agent] of res  
+    if not member? res critical-list [      
+       set critical-list lput res critical-list
+    ]
+     
+    if [safety] of h >= 2 [   
+      ask res [
+        set asked-for-gov-home false  ; set as false
+        set critical-list remove res critical-list ; remove from list
+      ]
+    ]
+  ]
+end
+
+to create-bank-queue
+  ask banks [
+    let my-bank self   ;; store reference to this bank
+    let candidates residents with [apply-for-bank-loan]
+    set candidates sort-by [ [a b] -> [income] of a > [income] of b ] candidates  ; sort from more to less income
+    let give_grant 0
+
+    if not empty? candidates [
+      foreach candidates [ person ->
+        ask person [
+          let h home-agent
+          let can-afford? (income * interest-rate) >= [cost-of-repair] of h
+          
+          if can-afford? [ ;if can afford and is not part of the queue add
+            if not member? self [loan-queue] of my-bank [
+              ask my-bank [
+                set loan-queue lput myself loan-queue
+              ]
+            ]
+          ]
+          
+          if bank-loan-given [ ;if the bank loan has given then eliminate from queue
+            if member? self [loan-queue] of my-bank [
+              ask my-bank [
+                set loan-queue remove myself loan-queue
+              ]
+            ]
+          
+          ]
+        ]
+      ]
+    ]
+    
+  ]
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; AUXILIAR/HELPERS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to repair-itself [res]
+  if [time-to-repair-manually] of res = 0 [
+    ask res [ set time-to-repair-manually 7 ]
+    ;; pick a damaged feature and set to 1
+    let random-feature one-of feature-names
+    let feature-value run-result (word "[ " random-feature " ] of self")
+    while [feature-value != 0] [
+      set random-feature one-of feature-names
+      set feature-value run-result (word "[ " random-feature " ] of self")
+    ]
+    run (word "set " random-feature " 1")
+    ask res [ set features-fixed-manually max list 0 (features-fixed-manually - 1) ]
+    set safety safety + 1
+    recalc-repair-plan self
+  ]
+   if [time-to-repair-manually] of res != 0 [
+       ask res [ set time-to-repair-manually time-to-repair-manually - 1 ]
+   ]
+end
+
+
+to pay-loan [res]
+  ask res [
+    if time-to-pay-bank-loan = 0 [
+      if money-to-give-bank-back != 0 [  
+        set income income - monthly-bank-payment ; reduce this money from the account
+        set money-to-give-bank-back money-to-give-bank-back - monthly-bank-payment
+        set time-to-pay-bank-loan 30 ; next payment in 30 months     
+        let ban one-of banks       
+        ask ban [        
+          set money money + [monthly-bank-payment] of res       
+        ]    
+      ]    
+      if money-to-give-bank-back <= 0 [ ;payment completed!
+        set bank-loan-completed true
+        set time-to-pay-bank-loan 0
+      ]  
+    ] 
+    if time-to-pay-bank-loan != 0 [
+      set time-to-pay-bank-loan time-to-pay-bank-loan - 1
+    ]
+  ] 
+end
+
+
+
+to give-homes-to-people
+  let gov one-of governments
+  ask gov [
+    ;; Only proceed if there's enough money
+    if money-for-buying-homes > 0 [
+      
+      
+      
+      ;; Check timing
+      if time-for-buying-homes = 0 [
+        
+        ;; --- 1. Select residents from critical-list ---
+        let selected-residents critical-list  ;; no fixed limit — we'll match with available homes later
+        
+        ;; --- 2. Select all available unowned homes ---
+        let available-homes homes with [has-owner = false and not gov-house]
+        
+        ;; --- 3. Sort homes by cost (cheapest first) ---
+        let sorted-homes sort-by [ [a b] -> [gov-cost] of a < [gov-cost] of b ] available-homes
+        
+        ;; --- 4. Select maximum number of homes within budget ---
+        let total-cost 0
+        let selected-homes []
+        foreach sorted-homes [ h ->
+          let c [gov-cost] of h
+          if (total-cost + c) <= money-for-buying-homes [
+            set selected-homes lput h selected-homes
+            set total-cost total-cost + c
+          ]
+        ]
+        
+        ;; --- 4a. Skip if no homes could be afforded ---
+        if (length selected-homes = 0) [
+
+          stop
+        ]
+        
+        ;; --- 5. Proceed only if there are homes and residents available ---
+        if (not empty? selected-residents) [
+          
+          ;; Limit residents to number of available homes
+          let num-pairs min (list length selected-residents length selected-homes)
+          
+          ;; --- 6. Assign homes to residents (1-to-1) ---
+          (foreach (sublist selected-residents 0 num-pairs)
+                   (sublist selected-homes 0 num-pairs)
+                   [ [res h] ->
+            
+            let old-home [home-agent] of res
+            if old-home != nobody [
+              ask old-home [
+                set has-owner false
+                set being-repaired false
+                set color gray
+                set gov-house false
+              ]
+            ]
+            
+            ask h [
+              set gov-house true
+              set has-owner true
+            ]
+            
+            ask res [
+              set home-agent h
+              set asked-for-gov-home false
+            ]
+          ])
+          
+          ;; --- 7. Deduct total cost and reset timer ---
+          set money-for-buying-homes money-for-buying-homes - total-cost
+          if money-for-buying-homes < 0 [ set money-for-buying-homes 0 ]
+          set time-for-buying-homes 30   ;; next purchase in next month
+        ]
+      ]
+      
+      ;; --- 8. Countdown timer for next buying round ---
+      if time-for-buying-homes != 0 [
+        set time-for-buying-homes time-for-buying-homes - 1
+      ]
+    ]
+  ]
+end
+
+
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; REPORTERS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to-report mean-safety
+  report mean [safety] of homes with [has-owner = true]
+end
+
+to-report trained-population
+  report count residents with [isTrained]
+end
+
+to-report homes-needing-repair
+  report count homes with [has-owner and safety < 8 and not empty? features-to-repair]
+end
+
+to-report homes-under-repair
+  report count homes with [has-owner and being-repaired]
+end
+
+to-report homes-repaired
+  report count homes with [has-owner and repairs-completed > 0]
+end
+
+to-report homes-with-minimum-8-s-score
+  report count homes with [safety >= 8] 
+end
+
+to-report professionals-list
+  report count residents with [asked-for-prof-help = true] 
+end
+
+to-report mean-safety-3-months-after
+  report mean-safety-after-3-months
+end
+
+to-report mean-safety-6-months-after
+  report mean-safety-after-6-months
+end
+
+to-report mean-safety-1-year-after
+  report mean-safety-after-1-year
+end
+
+to-report mean-safety-2-years-after
+  report mean-safety-after-2-years
+end
+
+to-report mean-safety-3-years-after
+  report mean-safety-after-3-years
+end
+
+to-report safe-houses-3-months-after
+  report num-safe-houses-after-3-months 
+end
+
+to-report safe-houses-6-months-after
+  report num-safe-houses-after-6-months 
+end
+
+to-report safe-houses-1-year-after
+  report num-safe-houses-after-1-year 
+end
+
+to-report safe-houses-2-years-after
+  report num-safe-houses-after-2-years
+end
+
+to-report safe-houses-3-years-after
+  report num-safe-houses-after-3-years
+end
+]]></code>
+  <widgets>
+    <view3d wrappingAllowedZ="true" x="0" wrappingAllowedX="true" y="0" minPycor="0" height="144" showTickCounter="true" patchSize="12.0" fontSize="12" wrappingAllowedY="true" width="192" tickCounterLabel="ticks" maxPycor="11" updateMode="0" frameRate="30.0" maxPzcor="0" maxPxcor="15" minPxcor="0" minPzcor="0"></view3d>
+    <monitor x="21" precision="2" y="114" height="60" fontSize="11" width="151" display="Mean Safety Score of houses from residents">mean-safety</monitor>
+    <button x="22" y="16" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="77" display="SET UP">setup</button>
+    <monitor x="22" precision="0" y="178" height="60" fontSize="11" width="152" display="Homes needing repair"><![CDATA[count homes with [has-owner and safety < 8 and not empty? features-to-repair]]]></monitor>
+    <monitor x="23" precision="2" y="242" height="60" fontSize="11" width="150" display="Trained Population">trained-population</monitor>
+    <button x="105" y="16" height="40" disableUntilTicks="false" forever="true" kind="Observer" width="66" display="GO">go</button>
+    <button x="22" y="60" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="150" display="Earthquake - Test Shock">earthquake</button>
+    <monitor x="194" precision="2" y="27" height="60" fontSize="11" width="150" display="min. 8 S.Score homes">homes-with-minimum-8-s-score</monitor>
+    <monitor x="364" precision="2" y="28" height="60" fontSize="11" width="150" display="People who applied for prof">professionals-list</monitor>
+    <slider x="547" step="0.01" y="26" max="1" width="250" display="buying-homes-multiplier" height="50" min="0" direction="Horizontal" default="0.05" variable="buying-homes-multiplier"></slider>
+    <slider x="1070" step="0.01" y="25" max="1" width="250" display="ngos-money-multiplier" height="50" min="0" direction="Horizontal" default="0.17" variable="ngos-money-multiplier"></slider>
+    <slider x="808" step="0.01" y="24" max="1" width="250" display="residents-money-multiplier" height="50" min="0" direction="Horizontal" default="0.78" variable="residents-money-multiplier"></slider>
+    <monitor x="554" precision="2" y="138" height="60" fontSize="11" width="151" display="S.Score 3 months">mean-safety-3-months-after</monitor>
+    <monitor x="554" precision="2" y="209" height="60" fontSize="11" width="151" display="S.Score 6-months">mean-safety-6-months-after</monitor>
+    <monitor x="556" precision="2" y="278" height="60" fontSize="11" width="151" display="S.Score 1 year">mean-safety-1-year-after</monitor>
+    <monitor x="554" precision="2" y="346" height="60" fontSize="11" width="151" display="S.Score 2 years">mean-safety-2-years-after</monitor>
+    <monitor x="554" precision="2" y="417" height="60" fontSize="11" width="151" display="S.Score 3 years">mean-safety-3-years-after</monitor>
+    <monitor x="732" precision="2" y="138" height="60" fontSize="11" width="151" display="Safe homes 3 months">safe-houses-3-months-after</monitor>
+    <monitor x="734" precision="2" y="215" height="60" fontSize="11" width="151" display="Safe homes 6 months">safe-houses-6-months-after</monitor>
+    <monitor x="733" precision="2" y="286" height="60" fontSize="11" width="151" display="Safe homes 1 year">safe-houses-1-year-after</monitor>
+    <monitor x="733" precision="2" y="355" height="60" fontSize="11" width="151" display="Safe homes 2 years">safe-houses-2-years-after</monitor>
+    <monitor x="733" precision="2" y="423" height="60" fontSize="11" width="151" display="Safe home 3 years">safe-houses-3-years-after</monitor>
+    <plot x="902" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="Number of Houses" y="114" xMin="0.0" height="212" legend="false" xMax="10.0" yMin="0.0" width="431" xAxis="Days" display="Repairs: Needing vs Under-Repair vs Repaired">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="needing" color="-2674135" legend="true">
+        <setup></setup>
+        <update>plot homes-needing-repair</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="repaired" color="-14439633" legend="true">
+        <setup></setup>
+        <update>plot homes-repaired</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="under-repair" color="-13345367" legend="true">
+        <setup></setup>
+        <update>plot homes-under-repair</update>
+      </pen>
+    </plot>
+    <plot x="183" autoPlotX="false" yMax="1200.0" autoPlotY="false" yAxis="Mean S.Score" y="308" xMin="0.0" height="187" legend="false" xMax="1080.0" yMin="0.0" width="266" xAxis="days" display="Safe houses">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="default" color="-16777216" legend="true">
+        <setup><![CDATA[plot count homes with [safety >= 8]]]></setup>
+        <update><![CDATA[plot count homes with [safety >= 8]]]></update>
+      </pen>
+    </plot>
+    <plot x="183" autoPlotX="false" yMax="7.0" autoPlotY="false" yAxis="Mean S.Score" y="104" xMin="0.0" height="187" legend="false" xMax="1080.0" yMin="4.0" width="266" xAxis="days" display="Mean Safety Score">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="default" color="-16777216" legend="true">
+        <setup>plot mean [safety] of homes with [has-owner = true]</setup>
+        <update>plot mean [safety] of homes with [has-owner = true]</update>
+      </pen>
+    </plot>
+  </widgets>
+  <info>## WHAT IS IT?
+
+(a general understanding of what the model is trying to show or explain)
+
+## HOW IT WORKS
+
+(what rules the agents use to create the overall behavior of the model)
+
+## HOW TO USE IT
+
+(how to use the model, including a description of each of the items in the Interface tab)
+
+## THINGS TO NOTICE
+
+(suggested things for the user to notice while running the model)
+
+## THINGS TO TRY
+
+(suggested things for the user to try to do (move sliders, switches, etc.) with the model)
+
+## EXTENDING THE MODEL
+
+(suggested things to add or change in the Code tab to make the model more complicated, detailed, accurate, etc.)
+
+## NETLOGO FEATURES
+
+(interesting or unusual features of NetLogo that the model uses, particularly in the Code tab; or where workarounds were needed for missing features)
+
+## RELATED MODELS
+
+(models in the NetLogo Models Library and elsewhere which are of related interest)
+
+## CREDITS AND REFERENCES
+
+(a reference to the model's URL on the web if it has one, as well as any other necessary credits, citations, and links)
+</info>
+  <turtleShapes>
+    <shape name="default" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="5"></point>
+        <point x="40" y="250"></point>
+        <point x="150" y="205"></point>
+        <point x="260" y="250"></point>
+      </polygon>
+    </shape>
+    <shape name="airplane" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="135" y="15"></point>
+        <point x="120" y="60"></point>
+        <point x="120" y="105"></point>
+        <point x="15" y="165"></point>
+        <point x="15" y="195"></point>
+        <point x="120" y="180"></point>
+        <point x="135" y="240"></point>
+        <point x="105" y="270"></point>
+        <point x="120" y="285"></point>
+        <point x="150" y="270"></point>
+        <point x="180" y="285"></point>
+        <point x="210" y="270"></point>
+        <point x="165" y="240"></point>
+        <point x="180" y="180"></point>
+        <point x="285" y="195"></point>
+        <point x="285" y="165"></point>
+        <point x="180" y="105"></point>
+        <point x="180" y="60"></point>
+        <point x="165" y="15"></point>
+      </polygon>
+    </shape>
+    <shape name="arrow" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="0"></point>
+        <point x="0" y="150"></point>
+        <point x="105" y="150"></point>
+        <point x="105" y="293"></point>
+        <point x="195" y="293"></point>
+        <point x="195" y="150"></point>
+        <point x="300" y="150"></point>
+      </polygon>
+    </shape>
+    <shape name="box" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="285"></point>
+        <point x="285" y="225"></point>
+        <point x="285" y="75"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="135"></point>
+        <point x="15" y="75"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="75"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="75"></point>
+        <point x="15" y="225"></point>
+        <point x="150" y="285"></point>
+        <point x="150" y="135"></point>
+      </polygon>
+      <line endX="150" startY="285" marked="false" color="255" endY="135" startX="150"></line>
+      <line endX="15" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+      <line endX="285" startY="135" marked="false" color="255" endY="75" startX="150"></line>
+    </shape>
+    <shape name="bug" rotatable="true" editableColorIndex="0">
+      <circle x="96" y="182" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="110" y="127" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <circle x="110" y="75" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <line endX="80" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+      <line endX="220" startY="100" marked="true" color="-1920102913" endY="30" startX="150"></line>
+    </shape>
+    <shape name="butterfly" rotatable="true" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="209" y="199"></point>
+        <point x="225" y="225"></point>
+        <point x="225" y="255"></point>
+        <point x="195" y="270"></point>
+        <point x="165" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="165"></point>
+        <point x="89" y="198"></point>
+        <point x="75" y="225"></point>
+        <point x="75" y="255"></point>
+        <point x="105" y="270"></point>
+        <point x="135" y="255"></point>
+        <point x="150" y="240"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="139" y="148"></point>
+        <point x="100" y="105"></point>
+        <point x="55" y="90"></point>
+        <point x="25" y="90"></point>
+        <point x="10" y="105"></point>
+        <point x="10" y="135"></point>
+        <point x="25" y="180"></point>
+        <point x="40" y="195"></point>
+        <point x="85" y="194"></point>
+        <point x="139" y="163"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="162" y="150"></point>
+        <point x="200" y="105"></point>
+        <point x="245" y="90"></point>
+        <point x="275" y="90"></point>
+        <point x="290" y="105"></point>
+        <point x="290" y="135"></point>
+        <point x="275" y="180"></point>
+        <point x="260" y="195"></point>
+        <point x="215" y="195"></point>
+        <point x="162" y="165"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="135" y="225"></point>
+        <point x="120" y="150"></point>
+        <point x="135" y="120"></point>
+        <point x="150" y="105"></point>
+        <point x="165" y="120"></point>
+        <point x="180" y="150"></point>
+        <point x="165" y="225"></point>
+      </polygon>
+      <circle x="135" y="90" marked="false" color="255" diameter="30" filled="true"></circle>
+      <line endX="195" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+      <line endX="105" startY="105" marked="false" color="255" endY="60" startX="150"></line>
+    </shape>
+    <shape name="car" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="300" y="180"></point>
+        <point x="279" y="164"></point>
+        <point x="261" y="144"></point>
+        <point x="240" y="135"></point>
+        <point x="226" y="132"></point>
+        <point x="213" y="106"></point>
+        <point x="203" y="84"></point>
+        <point x="185" y="63"></point>
+        <point x="159" y="50"></point>
+        <point x="135" y="50"></point>
+        <point x="75" y="60"></point>
+        <point x="0" y="150"></point>
+        <point x="0" y="165"></point>
+        <point x="0" y="225"></point>
+        <point x="300" y="225"></point>
+        <point x="300" y="180"></point>
+      </polygon>
+      <circle x="180" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <circle x="30" y="180" marked="false" color="255" diameter="90" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="162" y="80"></point>
+        <point x="132" y="78"></point>
+        <point x="134" y="135"></point>
+        <point x="209" y="135"></point>
+        <point x="194" y="105"></point>
+        <point x="189" y="96"></point>
+        <point x="180" y="89"></point>
+      </polygon>
+      <circle x="47" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+      <circle x="195" y="195" marked="true" color="-1920102913" diameter="58" filled="true"></circle>
+    </shape>
+    <shape name="circle" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="circle 2" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+    </shape>
+    <shape name="cow" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="200" y="193"></point>
+        <point x="197" y="249"></point>
+        <point x="179" y="249"></point>
+        <point x="177" y="196"></point>
+        <point x="166" y="187"></point>
+        <point x="140" y="189"></point>
+        <point x="93" y="191"></point>
+        <point x="78" y="179"></point>
+        <point x="72" y="211"></point>
+        <point x="49" y="209"></point>
+        <point x="48" y="181"></point>
+        <point x="37" y="149"></point>
+        <point x="25" y="120"></point>
+        <point x="25" y="89"></point>
+        <point x="45" y="72"></point>
+        <point x="103" y="84"></point>
+        <point x="179" y="75"></point>
+        <point x="198" y="76"></point>
+        <point x="252" y="64"></point>
+        <point x="272" y="81"></point>
+        <point x="293" y="103"></point>
+        <point x="285" y="121"></point>
+        <point x="255" y="121"></point>
+        <point x="242" y="118"></point>
+        <point x="224" y="167"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="73" y="210"></point>
+        <point x="86" y="251"></point>
+        <point x="62" y="249"></point>
+        <point x="48" y="208"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="25" y="114"></point>
+        <point x="16" y="195"></point>
+        <point x="9" y="204"></point>
+        <point x="23" y="213"></point>
+        <point x="25" y="200"></point>
+        <point x="39" y="123"></point>
+      </polygon>
+    </shape>
+    <shape name="cylinder" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+    </shape>
+    <shape name="dot" rotatable="false" editableColorIndex="0">
+      <circle x="90" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+    </shape>
+    <shape name="face happy" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="255"></point>
+        <point x="90" y="239"></point>
+        <point x="62" y="213"></point>
+        <point x="47" y="191"></point>
+        <point x="67" y="179"></point>
+        <point x="90" y="203"></point>
+        <point x="109" y="218"></point>
+        <point x="150" y="225"></point>
+        <point x="192" y="218"></point>
+        <point x="210" y="203"></point>
+        <point x="227" y="181"></point>
+        <point x="251" y="194"></point>
+        <point x="236" y="217"></point>
+        <point x="212" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="face neutral" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="7" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <rectangle endX="240" startY="195" marked="false" color="255" endY="225" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="face sad" rotatable="false" editableColorIndex="0">
+      <circle x="8" y="8" marked="true" color="-1920102913" diameter="285" filled="true"></circle>
+      <circle x="60" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <circle x="180" y="75" marked="false" color="255" diameter="60" filled="true"></circle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="150" y="168"></point>
+        <point x="90" y="184"></point>
+        <point x="62" y="210"></point>
+        <point x="47" y="232"></point>
+        <point x="67" y="244"></point>
+        <point x="90" y="220"></point>
+        <point x="109" y="205"></point>
+        <point x="150" y="198"></point>
+        <point x="192" y="205"></point>
+        <point x="210" y="220"></point>
+        <point x="227" y="242"></point>
+        <point x="251" y="229"></point>
+        <point x="236" y="206"></point>
+        <point x="212" y="183"></point>
+      </polygon>
+    </shape>
+    <shape name="fish" rotatable="false" editableColorIndex="0">
+      <polygon color="-1" filled="true" marked="false">
+        <point x="44" y="131"></point>
+        <point x="21" y="87"></point>
+        <point x="15" y="86"></point>
+        <point x="0" y="120"></point>
+        <point x="15" y="150"></point>
+        <point x="0" y="180"></point>
+        <point x="13" y="214"></point>
+        <point x="20" y="212"></point>
+        <point x="45" y="166"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="135" y="195"></point>
+        <point x="119" y="235"></point>
+        <point x="95" y="218"></point>
+        <point x="76" y="210"></point>
+        <point x="46" y="204"></point>
+        <point x="60" y="165"></point>
+      </polygon>
+      <polygon color="-1" filled="true" marked="false">
+        <point x="75" y="45"></point>
+        <point x="83" y="77"></point>
+        <point x="71" y="103"></point>
+        <point x="86" y="114"></point>
+        <point x="166" y="78"></point>
+        <point x="135" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="136"></point>
+        <point x="151" y="77"></point>
+        <point x="226" y="81"></point>
+        <point x="280" y="119"></point>
+        <point x="292" y="146"></point>
+        <point x="292" y="160"></point>
+        <point x="287" y="170"></point>
+        <point x="270" y="195"></point>
+        <point x="195" y="210"></point>
+        <point x="151" y="212"></point>
+        <point x="30" y="166"></point>
+      </polygon>
+      <circle x="215" y="106" marked="false" color="255" diameter="30" filled="true"></circle>
+    </shape>
+    <shape name="flag" rotatable="false" editableColorIndex="0">
+      <rectangle endX="75" startY="15" marked="true" color="-1920102913" endY="300" startX="60" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="90" y="150"></point>
+        <point x="270" y="90"></point>
+        <point x="90" y="30"></point>
+      </polygon>
+      <line endX="90" startY="135" marked="true" color="-1920102913" endY="135" startX="75"></line>
+      <line endX="90" startY="45" marked="true" color="-1920102913" endY="45" startX="75"></line>
+    </shape>
+    <shape name="flower" rotatable="false" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="135" y="120"></point>
+        <point x="165" y="165"></point>
+        <point x="180" y="210"></point>
+        <point x="180" y="240"></point>
+        <point x="150" y="300"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="240"></point>
+        <point x="195" y="195"></point>
+        <point x="165" y="135"></point>
+      </polygon>
+      <circle x="85" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="147" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="192" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="85" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="40" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="177" y="132" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="70" y="85" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="130" y="25" marked="true" color="-1920102913" diameter="38" filled="true"></circle>
+      <circle x="96" y="51" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="113" y="68" marked="false" color="255" diameter="74" filled="true"></circle>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="189" y="233"></point>
+        <point x="219" y="188"></point>
+        <point x="249" y="173"></point>
+        <point x="279" y="188"></point>
+        <point x="234" y="218"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="180" y="255"></point>
+        <point x="150" y="210"></point>
+        <point x="105" y="210"></point>
+        <point x="75" y="240"></point>
+        <point x="135" y="240"></point>
+      </polygon>
+    </shape>
+    <shape name="house" rotatable="false" editableColorIndex="0">
+      <rectangle endX="255" startY="120" marked="true" color="-1920102913" endY="285" startX="45" filled="true"></rectangle>
+      <rectangle endX="180" startY="210" marked="false" color="255" endY="285" startX="120" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="15" y="120"></point>
+        <point x="150" y="15"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+      <line endX="270" startY="120" marked="false" color="255" endY="120" startX="30"></line>
+    </shape>
+    <shape name="leaf" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="210"></point>
+        <point x="135" y="195"></point>
+        <point x="120" y="210"></point>
+        <point x="60" y="210"></point>
+        <point x="30" y="195"></point>
+        <point x="60" y="180"></point>
+        <point x="60" y="165"></point>
+        <point x="15" y="135"></point>
+        <point x="30" y="120"></point>
+        <point x="15" y="105"></point>
+        <point x="40" y="104"></point>
+        <point x="45" y="90"></point>
+        <point x="60" y="90"></point>
+        <point x="90" y="105"></point>
+        <point x="105" y="120"></point>
+        <point x="120" y="120"></point>
+        <point x="105" y="60"></point>
+        <point x="120" y="60"></point>
+        <point x="135" y="30"></point>
+        <point x="150" y="15"></point>
+        <point x="165" y="30"></point>
+        <point x="180" y="60"></point>
+        <point x="195" y="60"></point>
+        <point x="180" y="120"></point>
+        <point x="195" y="120"></point>
+        <point x="210" y="105"></point>
+        <point x="240" y="90"></point>
+        <point x="255" y="90"></point>
+        <point x="263" y="104"></point>
+        <point x="285" y="105"></point>
+        <point x="270" y="120"></point>
+        <point x="285" y="135"></point>
+        <point x="240" y="165"></point>
+        <point x="240" y="180"></point>
+        <point x="270" y="195"></point>
+        <point x="240" y="210"></point>
+        <point x="180" y="210"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="195"></point>
+        <point x="135" y="240"></point>
+        <point x="120" y="255"></point>
+        <point x="105" y="255"></point>
+        <point x="105" y="285"></point>
+        <point x="135" y="285"></point>
+        <point x="165" y="240"></point>
+        <point x="165" y="195"></point>
+      </polygon>
+    </shape>
+    <shape name="line" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="300" startX="150"></line>
+    </shape>
+    <shape name="line half" rotatable="true" editableColorIndex="0">
+      <line endX="150" startY="0" marked="true" color="-1920102913" endY="150" startX="150"></line>
+    </shape>
+    <shape name="pentagon" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="15"></point>
+        <point x="15" y="120"></point>
+        <point x="60" y="285"></point>
+        <point x="240" y="285"></point>
+        <point x="285" y="120"></point>
+      </polygon>
+    </shape>
+    <shape name="person" rotatable="false" editableColorIndex="0">
+      <circle x="110" y="5" marked="true" color="-1920102913" diameter="80" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="120" y="195"></point>
+        <point x="90" y="285"></point>
+        <point x="105" y="300"></point>
+        <point x="135" y="300"></point>
+        <point x="150" y="225"></point>
+        <point x="165" y="300"></point>
+        <point x="195" y="300"></point>
+        <point x="210" y="285"></point>
+        <point x="180" y="195"></point>
+        <point x="195" y="90"></point>
+      </polygon>
+      <rectangle endX="172" startY="79" marked="true" color="-1920102913" endY="94" startX="127" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="195" y="90"></point>
+        <point x="240" y="150"></point>
+        <point x="225" y="180"></point>
+        <point x="165" y="105"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="105" y="90"></point>
+        <point x="60" y="150"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="105"></point>
+      </polygon>
+    </shape>
+    <shape name="plant" rotatable="false" editableColorIndex="0">
+      <rectangle endX="165" startY="90" marked="true" color="-1920102913" endY="300" startX="135" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="255"></point>
+        <point x="90" y="210"></point>
+        <point x="45" y="195"></point>
+        <point x="75" y="255"></point>
+        <point x="135" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="255"></point>
+        <point x="210" y="210"></point>
+        <point x="255" y="195"></point>
+        <point x="225" y="255"></point>
+        <point x="165" y="285"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="180"></point>
+        <point x="90" y="135"></point>
+        <point x="45" y="120"></point>
+        <point x="75" y="180"></point>
+        <point x="135" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="180"></point>
+        <point x="165" y="210"></point>
+        <point x="225" y="180"></point>
+        <point x="255" y="120"></point>
+        <point x="210" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="105"></point>
+        <point x="90" y="60"></point>
+        <point x="45" y="45"></point>
+        <point x="75" y="105"></point>
+        <point x="135" y="135"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="165" y="105"></point>
+        <point x="165" y="135"></point>
+        <point x="225" y="105"></point>
+        <point x="255" y="45"></point>
+        <point x="210" y="60"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="135" y="90"></point>
+        <point x="120" y="45"></point>
+        <point x="150" y="15"></point>
+        <point x="180" y="45"></point>
+        <point x="165" y="90"></point>
+      </polygon>
+    </shape>
+    <shape name="sheep" rotatable="false" editableColorIndex="15">
+      <circle x="203" y="65" marked="true" color="-1" diameter="88" filled="true"></circle>
+      <circle x="70" y="65" marked="true" color="-1" diameter="162" filled="true"></circle>
+      <circle x="150" y="105" marked="true" color="-1" diameter="120" filled="true"></circle>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="218" y="120"></point>
+        <point x="240" y="165"></point>
+        <point x="255" y="165"></point>
+        <point x="278" y="120"></point>
+      </polygon>
+      <circle x="214" y="72" marked="false" color="-1920102913" diameter="67" filled="true"></circle>
+      <rectangle endX="179" startY="223" marked="true" color="-1" endY="298" startX="164" filled="true"></rectangle>
+      <polygon color="-1" filled="true" marked="true">
+        <point x="45" y="285"></point>
+        <point x="30" y="285"></point>
+        <point x="30" y="240"></point>
+        <point x="15" y="195"></point>
+        <point x="45" y="210"></point>
+      </polygon>
+      <circle x="3" y="83" marked="true" color="-1" diameter="150" filled="true"></circle>
+      <rectangle endX="80" startY="221" marked="true" color="-1" endY="296" startX="65" filled="true"></rectangle>
+      <polygon color="-1" filled="true" marked="true">
+        <point x="195" y="285"></point>
+        <point x="210" y="285"></point>
+        <point x="210" y="240"></point>
+        <point x="240" y="210"></point>
+        <point x="195" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="276" y="85"></point>
+        <point x="285" y="105"></point>
+        <point x="302" y="99"></point>
+        <point x="294" y="83"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="false">
+        <point x="219" y="85"></point>
+        <point x="210" y="105"></point>
+        <point x="193" y="99"></point>
+        <point x="201" y="83"></point>
+      </polygon>
+    </shape>
+    <shape name="square" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+    </shape>
+    <shape name="square 2" rotatable="false" editableColorIndex="0">
+      <rectangle endX="270" startY="30" marked="true" color="-1920102913" endY="270" startX="30" filled="true"></rectangle>
+      <rectangle endX="240" startY="60" marked="false" color="255" endY="240" startX="60" filled="true"></rectangle>
+    </shape>
+    <shape name="star" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="151" y="1"></point>
+        <point x="185" y="108"></point>
+        <point x="298" y="108"></point>
+        <point x="207" y="175"></point>
+        <point x="242" y="282"></point>
+        <point x="151" y="216"></point>
+        <point x="59" y="282"></point>
+        <point x="94" y="175"></point>
+        <point x="3" y="108"></point>
+        <point x="116" y="108"></point>
+      </polygon>
+    </shape>
+    <shape name="target" rotatable="false" editableColorIndex="0">
+      <circle x="0" y="0" marked="true" color="-1920102913" diameter="300" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <circle x="60" y="60" marked="true" color="-1920102913" diameter="180" filled="true"></circle>
+      <circle x="90" y="90" marked="false" color="255" diameter="120" filled="true"></circle>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+    </shape>
+    <shape name="tree" rotatable="false" editableColorIndex="0">
+      <circle x="118" y="3" marked="true" color="-1920102913" diameter="94" filled="true"></circle>
+      <rectangle endX="180" startY="195" marked="false" color="-1653716737" endY="300" startX="120" filled="true"></rectangle>
+      <circle x="65" y="21" marked="true" color="-1920102913" diameter="108" filled="true"></circle>
+      <circle x="116" y="41" marked="true" color="-1920102913" diameter="127" filled="true"></circle>
+      <circle x="45" y="90" marked="true" color="-1920102913" diameter="120" filled="true"></circle>
+      <circle x="104" y="74" marked="true" color="-1920102913" diameter="152" filled="true"></circle>
+    </shape>
+    <shape name="triangle" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+    </shape>
+    <shape name="triangle 2" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="150" y="30"></point>
+        <point x="15" y="255"></point>
+        <point x="285" y="255"></point>
+      </polygon>
+      <polygon color="255" filled="true" marked="false">
+        <point x="151" y="99"></point>
+        <point x="225" y="223"></point>
+        <point x="75" y="224"></point>
+      </polygon>
+    </shape>
+    <shape name="truck" rotatable="false" editableColorIndex="0">
+      <rectangle endX="195" startY="45" marked="true" color="-1920102913" endY="187" startX="4" filled="true"></rectangle>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="296" y="193"></point>
+        <point x="296" y="150"></point>
+        <point x="259" y="134"></point>
+        <point x="244" y="104"></point>
+        <point x="208" y="104"></point>
+        <point x="207" y="194"></point>
+      </polygon>
+      <rectangle endX="195" startY="60" marked="false" color="-1" endY="105" startX="195" filled="true"></rectangle>
+      <polygon color="255" filled="true" marked="false">
+        <point x="238" y="112"></point>
+        <point x="252" y="141"></point>
+        <point x="219" y="141"></point>
+        <point x="218" y="112"></point>
+      </polygon>
+      <circle x="234" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <rectangle endX="214" startY="185" marked="true" color="-1920102913" endY="194" startX="181" filled="true"></rectangle>
+      <circle x="144" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="false" color="255" diameter="42" filled="true"></circle>
+      <circle x="24" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="144" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+      <circle x="234" y="174" marked="true" color="-1920102913" diameter="42" filled="false"></circle>
+    </shape>
+    <shape name="turtle" rotatable="true" editableColorIndex="0">
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="215" y="204"></point>
+        <point x="240" y="233"></point>
+        <point x="246" y="254"></point>
+        <point x="228" y="266"></point>
+        <point x="215" y="252"></point>
+        <point x="193" y="210"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="195" y="90"></point>
+        <point x="225" y="75"></point>
+        <point x="245" y="75"></point>
+        <point x="260" y="89"></point>
+        <point x="269" y="108"></point>
+        <point x="261" y="124"></point>
+        <point x="240" y="105"></point>
+        <point x="225" y="105"></point>
+        <point x="210" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="105" y="90"></point>
+        <point x="75" y="75"></point>
+        <point x="55" y="75"></point>
+        <point x="40" y="89"></point>
+        <point x="31" y="108"></point>
+        <point x="39" y="124"></point>
+        <point x="60" y="105"></point>
+        <point x="75" y="105"></point>
+        <point x="90" y="105"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="132" y="85"></point>
+        <point x="134" y="64"></point>
+        <point x="107" y="51"></point>
+        <point x="108" y="17"></point>
+        <point x="150" y="2"></point>
+        <point x="192" y="18"></point>
+        <point x="192" y="52"></point>
+        <point x="169" y="65"></point>
+        <point x="172" y="87"></point>
+      </polygon>
+      <polygon color="1504722175" filled="true" marked="false">
+        <point x="85" y="204"></point>
+        <point x="60" y="233"></point>
+        <point x="54" y="254"></point>
+        <point x="72" y="266"></point>
+        <point x="85" y="252"></point>
+        <point x="107" y="210"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="119" y="75"></point>
+        <point x="179" y="75"></point>
+        <point x="209" y="101"></point>
+        <point x="224" y="135"></point>
+        <point x="220" y="225"></point>
+        <point x="175" y="261"></point>
+        <point x="128" y="261"></point>
+        <point x="81" y="224"></point>
+        <point x="74" y="135"></point>
+        <point x="88" y="99"></point>
+      </polygon>
+    </shape>
+    <shape name="wheel" rotatable="false" editableColorIndex="0">
+      <circle x="3" y="3" marked="true" color="-1920102913" diameter="294" filled="true"></circle>
+      <circle x="30" y="30" marked="false" color="255" diameter="240" filled="true"></circle>
+      <line endX="150" startY="285" marked="true" color="-1920102913" endY="15" startX="150"></line>
+      <line endX="285" startY="150" marked="true" color="-1920102913" endY="150" startX="15"></line>
+      <circle x="120" y="120" marked="true" color="-1920102913" diameter="60" filled="true"></circle>
+      <line endX="79" startY="40" marked="true" color="-1920102913" endY="269" startX="216"></line>
+      <line endX="269" startY="84" marked="true" color="-1920102913" endY="221" startX="40"></line>
+      <line endX="269" startY="216" marked="true" color="-1920102913" endY="79" startX="40"></line>
+      <line endX="221" startY="40" marked="true" color="-1920102913" endY="269" startX="84"></line>
+    </shape>
+    <shape name="wolf" rotatable="false" editableColorIndex="0">
+      <polygon color="255" filled="true" marked="false">
+        <point x="253" y="133"></point>
+        <point x="245" y="131"></point>
+        <point x="245" y="133"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="2" y="194"></point>
+        <point x="13" y="197"></point>
+        <point x="30" y="191"></point>
+        <point x="38" y="193"></point>
+        <point x="38" y="205"></point>
+        <point x="20" y="226"></point>
+        <point x="20" y="257"></point>
+        <point x="27" y="265"></point>
+        <point x="38" y="266"></point>
+        <point x="40" y="260"></point>
+        <point x="31" y="253"></point>
+        <point x="31" y="230"></point>
+        <point x="60" y="206"></point>
+        <point x="68" y="198"></point>
+        <point x="75" y="209"></point>
+        <point x="66" y="228"></point>
+        <point x="65" y="243"></point>
+        <point x="82" y="261"></point>
+        <point x="84" y="268"></point>
+        <point x="100" y="267"></point>
+        <point x="103" y="261"></point>
+        <point x="77" y="239"></point>
+        <point x="79" y="231"></point>
+        <point x="100" y="207"></point>
+        <point x="98" y="196"></point>
+        <point x="119" y="201"></point>
+        <point x="143" y="202"></point>
+        <point x="160" y="195"></point>
+        <point x="166" y="210"></point>
+        <point x="172" y="213"></point>
+        <point x="173" y="238"></point>
+        <point x="167" y="251"></point>
+        <point x="160" y="248"></point>
+        <point x="154" y="265"></point>
+        <point x="169" y="264"></point>
+        <point x="178" y="247"></point>
+        <point x="186" y="240"></point>
+        <point x="198" y="260"></point>
+        <point x="200" y="271"></point>
+        <point x="217" y="271"></point>
+        <point x="219" y="262"></point>
+        <point x="207" y="258"></point>
+        <point x="195" y="230"></point>
+        <point x="192" y="198"></point>
+        <point x="210" y="184"></point>
+        <point x="227" y="164"></point>
+        <point x="242" y="144"></point>
+        <point x="259" y="145"></point>
+        <point x="284" y="151"></point>
+        <point x="277" y="141"></point>
+        <point x="293" y="140"></point>
+        <point x="299" y="134"></point>
+        <point x="297" y="127"></point>
+        <point x="273" y="119"></point>
+        <point x="270" y="105"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="-1" y="195"></point>
+        <point x="14" y="180"></point>
+        <point x="36" y="166"></point>
+        <point x="40" y="153"></point>
+        <point x="53" y="140"></point>
+        <point x="82" y="131"></point>
+        <point x="134" y="133"></point>
+        <point x="159" y="126"></point>
+        <point x="188" y="115"></point>
+        <point x="227" y="108"></point>
+        <point x="236" y="102"></point>
+        <point x="238" y="98"></point>
+        <point x="268" y="86"></point>
+        <point x="269" y="92"></point>
+        <point x="281" y="87"></point>
+        <point x="269" y="103"></point>
+        <point x="269" y="113"></point>
+      </polygon>
+    </shape>
+    <shape name="x" rotatable="false" editableColorIndex="0">
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="270" y="75"></point>
+        <point x="225" y="30"></point>
+        <point x="30" y="225"></point>
+        <point x="75" y="270"></point>
+      </polygon>
+      <polygon color="-1920102913" filled="true" marked="true">
+        <point x="30" y="75"></point>
+        <point x="75" y="30"></point>
+        <point x="270" y="225"></point>
+        <point x="225" y="270"></point>
+      </polygon>
+    </shape>
+  </turtleShapes>
+  <linkShapes>
+    <shape name="default" curviness="0.0">
+      <lines>
+        <line x="-0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+        <line x="0.0" visible="true">
+          <dash value="1.0"></dash>
+          <dash value="0.0"></dash>
+        </line>
+        <line x="0.2" visible="false">
+          <dash value="0.0"></dash>
+          <dash value="1.0"></dash>
+        </line>
+      </lines>
+      <indicator>
+        <shape name="link direction" rotatable="true" editableColorIndex="0">
+          <line endX="90" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+          <line endX="210" startY="150" marked="true" color="-1920102913" endY="180" startX="150"></line>
+        </shape>
+      </indicator>
+    </shape>
+  </linkShapes>
+  <previewCommands>setup repeat 75 [ go ]</previewCommands>
+  <experiments>
+    <experiment name="experiment" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="true">
+      <setup>setup</setup>
+      <go>go</go>
+      <postRun>earthquake</postRun>
+      <exitCondition><![CDATA[ticks >= 1096]]></exitCondition>
+      <metrics>
+        <metric>mean-safety-after-3-months</metric>
+        <metric>mean-safety-after-6-months</metric>
+        <metric>mean-safety-after-1-year</metric>
+        <metric>mean-safety-after-2-years</metric>
+        <metric>mean-safety-after-3-years</metric>
+        <metric>num-safe-houses-after-3-months</metric>
+        <metric>num-safe-houses-after-6-months</metric>
+        <metric>num-safe-houses-after-1-year</metric>
+        <metric>num-safe-houses-after-2-years</metric>
+        <metric>num-safe-houses-after-3-years</metric>
+      </metrics>
+      <constants>
+        <enumeratedValueSet variable="residents-money-multiplier">
+          <value value="0.76"></value>
+          <value value="0.77"></value>
+          <value value="0.78"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="buying-homes-multiplier">
+          <value value="0.03"></value>
+          <value value="0.04"></value>
+          <value value="0.05"></value>
+          <value value="0.06"></value>
+          <value value="0.07"></value>
+          <value value="0.08"></value>
+          <value value="0.09"></value>
+          <value value="0.1"></value>
+        </enumeratedValueSet>
+        <enumeratedValueSet variable="ngos-money-multiplier">
+          <value value="0.1"></value>
+          <value value="0.11"></value>
+          <value value="0.12"></value>
+          <value value="0.13"></value>
+          <value value="0.14"></value>
+          <value value="0.15"></value>
+          <value value="0.16"></value>
+          <value value="0.17"></value>
+          <value value="0.18"></value>
+          <value value="0.19"></value>
+          <value value="0.2"></value>
+        </enumeratedValueSet>
+      </constants>
+    </experiment>
+  </experiments>
+</model>
